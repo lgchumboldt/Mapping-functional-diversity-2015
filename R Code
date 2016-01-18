@@ -1,0 +1,462 @@
+
+######################################################################################################
+
+#Clean workspace
+rm(list=ls())
+
+
+#####################Load required packages
+library(maptools)
+library(raster)
+library(rgdal)
+library(picante)
+library(geiger)
+library(plyr)
+library(parallel)
+library(rgeos)
+library(FD)
+library(ncf)
+
+######################################################################################################
+
+
+community=read.table("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Resultados/HBHandBook/Community_ParamoHbHandBook325_Funcional.txt", header=T) ## cargar community
+dim(community)
+head(community)
+
+
+######################################################################################################
+#############################Transformación de rasgos funcionales de aves#############################
+######################################################################################################
+
+
+
+tabla=read.delim("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Tablas_Modif/RasgosMapas.txt", header=T)
+
+data <- with(tabla,aggregate(tabla[,3:14],by=list(Especie=tabla$TipLabel),FUN=function(x){median(x,na.rm=T)}))
+
+data=data.frame(name=data$Especie, Culmen.total=data$L.Culmen.total, Alto.pico=data$Alto.pico, GAPE=data$GAPE, HWI=data$HWI, Hallux=data$L..Hallux, Peso=data$Peso)
+
+data=na.omit(data)
+
+HWI=data$HWI+(4.70)
+Hallux=data$Hallux+(1)
+
+data$HWI<-NULL
+data$Hallux<-NULL
+
+data2=cbind(data, HWI, Hallux)
+
+copy=data2[ ,-1]
+
+
+df <- data.frame(matrix(ncol = 0, nrow = dim(copy)[1]))
+
+for (i in  1:dim(copy)[2])
+  
+{
+  
+  b=log(copy[,i])
+  
+  df=cbind(df, b)
+  
+}
+
+rownames(df)=data2$nam
+colnames(df)=colnames(copy)
+
+Peso=(df$Peso)/3
+df$Peso<-NULL
+df=cbind(df, Peso)
+
+com=as.data.frame(t(community))
+
+distFunc <- dist(df)
+arbolFunc <- hclust(distFunc)
+arbolFunc <- as.phylo(arbolFunc)
+
+#aa=treedata(phy=arbolFunc, data=com)
+
+#community=t(aa$data)
+#community=as.data.frame(community)
+
+df=df[-(which(is.na(match(rownames(df), colnames(community))))),]
+
+
+differences<-setdiff(colnames(community), rownames(df))
+
+df <- df[ order(row.names(df)), ]
+community <- community[ ,order(colnames(community))]
+community<- cbind(Grilla=as.numeric(rownames(community)), community)
+
+
+######################################################################################################
+################## II - Functional diversity computation #############################################
+######################################################################################################
+
+
+distFunc <- dist(df)
+#community2<- as.matrix(community)
+
+#fd.result <- fdisp(distFunc, community2)
+#fd.result <- as.data.frame(fd.result$FDis)
+#colnames(fd.result)=c("fdis")
+
+
+distFunc <- as.matrix(distFunc)
+mpd.result<-as.data.frame(mpd(community[,2:dim(community)[2]], distFunc))
+colnames(mpd.result)=c("mpd")
+head(mpd.result)
+
+riq <-rowSums(community[,2:dim(community)[2]])
+pd.result=cbind(mpd.result, riq)
+
+
+#####################################
+
+###### Includes the pd calculated in the matrix
+community$mpd<-pd.result[,1]
+community$SR<-pd.result[,2]
+
+
+#######Load the template raster (associated to matrix of species richness)
+
+r<-raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/bio_1.asc")
+
+rData<-as.data.frame(r)
+
+rData[which(!is.na(match(rownames(rData),rownames(community)))),2] <- pd.result[,2]
+
+#######Replace the values of raster for plot the functional diversity map
+values(r)<-rData[,2]
+
+
+
+#Write rasters (FD) to file
+setwd("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Resultados/HBHandBook/Rasters/Func")
+writeRaster(r, file="RichnessFunctional_328.tif", format="GTiff")
+
+
+
+######################################################################################################
+####################### III- Genarate a Null Model ###################################################
+######################################################################################################
+
+
+###In this function 'm' refers to number of randomizations, 'spnb' to number of species in a community, 'sn' to the names of species in the global pool and 'phylo' to the phylogeny
+
+give_complete_community_better= function(m=10000, spnb, sn, phylo) 
+{
+  #Generate community matrix
+  v.names <- paste("random_community",1:m,sep="") #row names
+  random_communities<-matrix(0,nrow=m,ncol=length(sn),dimnames=list(v.names,sn))
+  for (k in 1:m) {
+    sampling_names <- sample(sn,spnb)
+    random_communities[k, sampling_names] <- 1
+  }
+  
+  pd.result<-as.data.frame(mpd(random_communities, phylo))
+  
+  return(pd.result)
+}
+
+
+
+######################################################################################################
+#################### Species pool: Regional (p.e Cordilleras) ########################################
+######################################################################################################
+
+#####Identified the pixels involved in the regions. In the case of the cordilleras, identified the pixels of Cordillera Oriental, C. Central and C. Occidental from the shapes files
+####Load and overlap the shape files over the template raster 
+
+Oriental <- readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Cordillera oriental.csv.shp")
+Central <- readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Cordillera central.shp")
+Occidental <- readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Cordillera occidental.shp")
+Macizo=readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Macizo.shp")
+Central=gUnion(Central, Macizo)
+Central=gUnion(Central, Occidental)
+
+
+
+shapesCordilleras <- vector(mode="list",length=2)
+shapesCordilleras[[1]] <- Oriental
+shapesCordilleras[[2]] <- Central
+
+
+####Create the species matrix for each cordillera
+
+
+
+matrixCord <- vector(mode="list",length=2)
+
+r<- raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/bio_1.asc")
+
+for (i in 1:length(shapesCordilleras))
+
+{
+  templateR <- r
+  values(templateR) <- 1
+  rasterTemplate <- mask(templateR, shapesCordilleras[[i]])
+  templateData <- as.data.frame(rasterTemplate)
+  w <- which(templateData[,1] == 1)
+  matrixC <- community[which(!is.na(match(rownames(community),w))),]
+  m <- which(colSums(matrixC) == 0)
+  matrixC <- matrixC[,-(m+1)]
+  matrixCord[[i]]<- matrixC
+}
+
+
+
+phylogeny_Cord <- vector(mode="list",length=length(shapesCordilleras))
+
+
+for(i in 1:length(phylogeny_Cord))
+
+{
+  matriz <- matrixCord[[i]]
+  matriz$Grilla<-NULL
+  matriz <- t(matriz)
+  
+  dff=df
+  distF <- dist(dff)
+  arbolF <- hclust(distF)
+  user_phylogeny <- as.phylo(arbolF)
+  
+  phylo_Cord <- treedata(user_phylogeny,matriz)
+  pp=phylo_Cord$phy
+  
+  
+  dff=dff[-(which(is.na(match(rownames(dff), pp$tip.label)))),]
+  
+  distF <- dist(dff)
+  distF <- as.matrix(distF)
+  
+  
+  phylogeny_Cord[[i]] <-distF
+}
+
+
+c<-vector(mode="list",length=length(shapesCordilleras))
+species_per_pixel <- vector(mode="list",length=length(shapesCordilleras))
+cores_2_use <- detectCores()-2
+
+
+
+####Make the null model for each cordillera
+
+for(i in 1:length(matrixCord))
+{
+  matriz <- matrixCord[[i]]
+  matriz <- matriz[,2:dim(matriz)[2]]
+  species_per_pixel[[i]] <- unique(matriz$SR)
+  phylogeny <- phylogeny_Cord[[i]]
+  species_names <- rownames(phylogeny)
+  c[[i]]<-mclapply(species_per_pixel[[i]],function(x) give_complete_community_better(spnb=x, sn=species_names, phylo=phylogeny), mc.cores=cores_2_use)
+}
+
+
+
+## To evaluate the significance of each pixel (more or less functional diversity than the expected under a null model) the upper and lower limits are calculated from quantile 75 and quantile 25 of null functional diversity
+#### When the observed value <= expected lower limit value -> "5"
+#### When the observed value >= expected upper limit value -> "10"
+#### When the observed value == expected value -> "1"
+
+matrices<-vector(mode="list",length=length(shapesCordilleras))
+
+#### Is necessary define the index (column) that you want evaluate. 'cond' contains all the index calculate for the null model, so to define the max and min must be selected the index (column) of interest
+
+
+mpd.result<-vector(mode="list",length=length(c))
+
+for(i in 1:length(c))
+
+	{
+  	randomCord <- c[[i]]
+  	riqueza <- species_per_pixel[[i]]
+  
+  
+  	for(j in 1:length(randomCord)) 
+  
+  		{
+    
+    		elemento <- randomCord[[j]]
+    		numberSpecies <- riqueza[j]
+    		nuevoDataFrame <- data.frame(elemento,numberSpecies)
+    		mpd.result[[i]][[j]] <- nuevoDataFrame 
+  		}
+	}
+
+
+
+for (j in 1:length(matrixCord)) 
+
+	{
+  	communities1=matrixCord[[j]]
+  	communities1$Max<-NA
+  	communities1$Min<-NA
+  	communities1$Significancia<-NA
+  	aleatorizaciones=rbind.fill(mpd.result[[j]])
+  
+  
+  	for (i in 1:length(species_per_pixel[[j]])) 
+  
+		{
+    		numeroSpp <- species_per_pixel[[j]]
+    		subset_per_count <- subset(communities1, communities1$SR == numeroSpp[i])
+    		match_rows<-rownames(subset_per_count)
+    		observed_values<-communities1[match_rows,"mpd"]
+    		number_match<-length(observed_values)
+    		cond=aleatorizaciones[which(aleatorizaciones[,2]==numeroSpp[i]),]
+    		max=quantile(cond[,1],0.975, na.rm = TRUE) ### cond[,number of column (index) of interest]
+    		min=quantile(cond[,1],0.025, na.rm = TRUE) ### cond[,number of column (index) of interest]
+    		Significancia=observed_values
+    		Significancia[observed_values<max & observed_values>min]<-1
+    		Significancia[observed_values<=min]<-5
+    		Significancia[observed_values>=max]<-10
+    		communities1[match_rows,"Significancia"]<-Significancia 
+    		communities1[match_rows,"Max"]<-max 
+    		communities1[match_rows,"Min"]<-min   
+  		}
+  		
+  	matrices[[j]]<-communities1
+
+	}
+
+
+finalCord <- rbind.fill(matrices)
+class(finalCord)
+
+finalCord <- finalCord[order(finalCord$Grilla),]
+SignificanciaPD_Cord <- finalCord$Significancia
+
+
+#######Load the template raster (associated to matrix of species richness). This step can be obviated if the raster used to map the functional diversity is loaded and correspond with the matrix "communitiesTraits"
+#####From the number of pixel, join the data of the each cordillera in one matrix
+
+r <- raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/bio_1.asc")
+
+rData<-as.data.frame(r)
+
+dim(rData)
+rData[match(finalCord$Grilla, row.names(rData)),2] <- SignificanciaPD_Cord
+rData[match(row.names(pd.result), row.names(rData)),3] <- pd.result[,1]
+rData[match(row.names(pd.result), row.names(rData)),4] <- pd.result[,2]
+
+
+################
+Oriental <- readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Cordillera oriental.csv.shp")
+Central <- readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Cordillera central.shp")
+Occidental <- readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Cordillera occidental.shp")
+Macizo=readShapePoly("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/Shape Cordilleras/Macizo.shp")
+Central=gUnion(Central, Macizo)
+
+
+shapesCordilleras <- vector(mode="list",length=2)
+shapesCordilleras[[1]] <- Oriental
+shapesCordilleras[[2]] <- Central
+shapesCordilleras[[3]] <- Occidental
+
+
+####Create the species matrix for each cordillera
+
+
+
+matrixCord <- vector(mode="list",length=3)
+
+r<-raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/bio_1.asc")
+
+for (i in 1:length(shapesCordilleras))
+
+{
+	templateR <- r
+	values(templateR) <- 1
+	rasterTemplate <- mask(templateR, shapesCordilleras[[i]])
+	templateData <- as.data.frame(rasterTemplate)
+	w <- which(templateData[,1] == 1)
+	matrixC <- community[which(!is.na(match(rownames(community),w))),]
+	m <- which(colSums(matrixC) == 0)
+	matrixC <- matrixC[,-(m+1)]
+	matrixCord[[i]]<- matrixC
+}
+
+###############
+
+
+roworiental=matrixCord[[1]]$Grilla
+rowcentral=matrixCord[[2]]$Grilla
+rowoccidental=matrixCord[[3]]$Grilla
+
+
+a=as.data.frame(rep(1, length(roworiental)))
+rownames(a)=roworiental
+colnames(a)=c("cordillera")
+
+b=as.data.frame(rep(2, length(rowcentral)))
+rownames(b)=rowcentral
+colnames(b)=c("cordillera")
+
+e=as.data.frame(rep(3, length(rowoccidental)))
+rownames(e)=rowoccidental
+colnames(e)=c("cordillera")
+
+c=rbind(a, b, e)
+
+rData[match(row.names(c), row.names(rData)),5] <- c[,1]
+
+
+colnames(rData)=c('Bio1','Significancia','MPD', 'SR', 'Coordilleras')
+
+
+Alt=raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/alt1/w001001.adf")
+Alt=as.data.frame(Alt)
+namesRData <- rownames(rData)
+Alt <- Alt[as.numeric(namesRData),1]
+rData <- cbind(rData,Alt)
+
+NPP=raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/NPP_Paramos.tif")
+NPP=as.data.frame(NPP)
+NPP <- NPP[as.numeric(namesRData),1]
+rData <- cbind(rData, NPP)
+
+RangoDiurno=raster("~/Google Drive/IAVH/Proyectos/Mapas Diversidad/Códigos y Datos/bio_2.asc")
+RangoDiurno=as.data.frame(RangoDiurno)
+RangoDiurno <- RangoDiurno[as.numeric(namesRData),1]
+rData <- cbind(rData,RangoDiurno)
+
+x = xFromCell(r,1:ncell(r))
+y = yFromCell(r,1:ncell(r))
+z = as.data.frame(cbind(x, y))
+z <- z[as.numeric(namesRData),1:2]
+rData <- cbind(rData,z)
+
+
+
+
+
+
+
+rData=na.omit(rData)
+
+
+par(oma=c(2,2,2,2))
+
+plot(rData$bio_1, rData$V3, col=rData$V2, pch=20, ylab="Fuctional Rao Index", xlab="Mean Temperature", cex.lab=1.3)
+a=lm(rData$V3~rData$bio_1)
+abline(a)
+
+colors[rData$V2]
+
+#######Replace the values of raster for plot the phylogenetic diversity map
+
+
+values(r)<-rData[,2]
+plot(r)
+
+
+#Write raster (PD significance) to file
+setwd(save_files)
+writeRaster(r,"SignificanciaRao_Functional.tif",format="GTiff")
+save.image("")
+
+
+########End of the code########
